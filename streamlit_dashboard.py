@@ -29,19 +29,89 @@ st.set_page_config(
 @st.cache_data
 def load_comparison_data():
     """Load the most recent comparison file."""
-    files = glob.glob("esker_lodge_hours_comparison_*.xlsx")
-    if not files:
-        return None, None
+    try:
+        files = glob.glob("esker_lodge_hours_comparison_*.xlsx")
+        if not files:
+            # Check if we're in a deployment environment and create sample data
+            return create_sample_data()
+        
+        latest_file = max(files)
+        
+        # Load all sheets
+        sheets = {}
+        with pd.ExcelFile(latest_file) as xls:
+            for sheet_name in xls.sheet_names:
+                sheets[sheet_name] = pd.read_excel(xls, sheet_name=sheet_name)
+        
+        return sheets, latest_file
+    except Exception as e:
+        st.error(f"Error loading data: {str(e)}")
+        return create_sample_data()
+
+def create_sample_data():
+    """Create sample data for demonstration purposes."""
+    # Create sample comparison data
+    np.random.seed(42)  # For reproducible results
     
-    latest_file = max(files)
+    departments = ['HCA', 'Nurse', 'Housekeeping', 'Kitchen', 'Maintenance', 'Administration']
+    names = [
+        'John Smith', 'Mary Johnson', 'David Brown', 'Sarah Wilson', 'Michael Davis',
+        'Lisa Anderson', 'Robert Taylor', 'Jennifer White', 'William Jones', 'Patricia Miller',
+        'James Garcia', 'Linda Martinez', 'Richard Rodriguez', 'Barbara Lewis', 'Joseph Lee',
+        'Susan Walker', 'Thomas Hall', 'Nancy Allen', 'Christopher Young', 'Betty King'
+    ]
     
-    # Load all sheets
-    sheets = {}
-    with pd.ExcelFile(latest_file) as xls:
-        for sheet_name in xls.sheet_names:
-            sheets[sheet_name] = pd.read_excel(xls, sheet_name=sheet_name)
+    n_employees = len(names)
     
-    return sheets, latest_file
+    # Generate sample data
+    comparison_data = []
+    for i, name in enumerate(names):
+        dept = np.random.choice(departments)
+        timesheet_hours = np.random.normal(160, 20)  # Average 160 hours with variation
+        
+        # Add some realistic discrepancies
+        if np.random.random() < 0.3:  # 30% chance of significant discrepancy
+            payroll_hours = timesheet_hours + np.random.normal(0, 15)
+        else:
+            payroll_hours = timesheet_hours + np.random.normal(0, 3)
+        
+        # Ensure non-negative hours
+        timesheet_hours = max(0, timesheet_hours)
+        payroll_hours = max(0, payroll_hours)
+        
+        difference = payroll_hours - timesheet_hours
+        mismatch_flag = 1 if abs(difference) > 2 else 0
+        
+        comparison_data.append({
+            'Employee Name': name,
+            'Department': dept,
+            'Timesheet Hours': round(timesheet_hours, 2),
+            'Payroll Hours': round(payroll_hours, 2),
+            'Difference': round(difference, 2),
+            'Mismatch Flag': mismatch_flag
+        })
+    
+    comparison_df = pd.DataFrame(comparison_data)
+    
+    # Create anomalies (employees with mismatches)
+    anomalies_df = comparison_df[comparison_df['Mismatch Flag'] == 1].copy()
+    
+    # Create department summary
+    dept_summary = comparison_df.groupby('Department').agg({
+        'Employee Name': 'count',
+        'Timesheet Hours': 'sum',
+        'Payroll Hours': 'sum',
+        'Difference': 'sum',
+        'Mismatch Flag': 'sum'
+    }).reset_index()
+    
+    sheets = {
+        'Hours Comparison': comparison_df,
+        'Anomalies': anomalies_df,
+        'Department Summary': dept_summary
+    }
+    
+    return sheets, "Sample Data (Demo Mode)"
 
 def create_overview_metrics(comparison_df, anomalies_df):
     """Create overview metrics cards."""
@@ -398,10 +468,9 @@ def main():
     with st.spinner("Loading comparison data..."):
         sheets, filename = load_comparison_data()
     
-    if not sheets:
-        st.error("No comparison data found. Please run the analysis first.")
-        st.info("Run `python timesheet_payroll_comparison.py` to generate the comparison data.")
-        return
+    # Check if we're using sample data
+    if filename == "Sample Data (Demo Mode)":
+        st.warning("⚠️ **Demo Mode**: Using sample data for demonstration. Upload your actual data files to see real analysis.")
     
     # Extract data
     comparison_df = sheets['Hours Comparison']
@@ -412,6 +481,14 @@ def main():
     st.sidebar.title("📊 Dashboard Navigation")
     st.sidebar.info(f"**Data Source:** {filename}")
     st.sidebar.info(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Add instructions for real data in sidebar if using sample data
+    if filename == "Sample Data (Demo Mode)":
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 📁 To Use Real Data:")
+        st.sidebar.markdown("1. Run `python timesheet_payroll_comparison.py`")
+        st.sidebar.markdown("2. Upload the generated Excel file")
+        st.sidebar.markdown("3. Refresh the dashboard")
     
     # Navigation
     page = st.sidebar.selectbox(
