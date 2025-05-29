@@ -238,6 +238,192 @@ def compare_hours_detailed(timesheet_df, payroll_df, hour_categories, tolerance=
     
     return comparison, hour_categories
 
+def extract_date_range_from_filename(filename):
+    """Extract date range from Excel filename."""
+    # Extract date range from filename like "1788-Esker Lodge Ltd Hours & Gross Pay Jan to Apr (2).xlsx"
+    filename_lower = filename.lower()
+    
+    # Common month abbreviations
+    months = {
+        'jan': 'January', 'feb': 'February', 'mar': 'March', 'apr': 'April',
+        'may': 'May', 'jun': 'June', 'jul': 'July', 'aug': 'August',
+        'sep': 'September', 'oct': 'October', 'nov': 'November', 'dec': 'December'
+    }
+    
+    # Look for patterns like "Jan to Apr" or "January to April"
+    for start_abbr, start_full in months.items():
+        for end_abbr, end_full in months.items():
+            pattern1 = f"{start_abbr} to {end_abbr}"
+            pattern2 = f"{start_full} to {end_full}"
+            
+            if pattern1 in filename_lower:
+                return f"{start_full} to {end_full}"
+            elif pattern2 in filename_lower:
+                return f"{start_full} to {end_full}"
+    
+    # Try to extract year if present
+    year_match = re.search(r'\((\d+)\)', filename)
+    year = year_match.group(1) if year_match else "Unknown Year"
+    
+    # Default fallback
+    if "jan to apr" in filename_lower:
+        return f"January to April {year}"
+    
+    return "Date range not specified"
+
+def categorize_employees_by_activity(comparison_df, timesheet_df, payroll_df):
+    """Categorize employees as active, inactive, or new based on data patterns."""
+    
+    try:
+        # Debug: Print available columns
+        print(f"Categorization debug - Available columns: {list(comparison_df.columns)}")
+        
+        # Analyze timesheet activity patterns
+        timesheet_activity = timesheet_df.groupby('Employee_ID').agg({
+            'Total Hours': ['sum', 'count'],
+            'YearWeek': ['min', 'max']
+        }).reset_index()
+        
+        # Flatten column names
+        timesheet_activity.columns = ['Employee_ID', 'Total_Hours_Sum', 'Week_Count', 'First_Week', 'Last_Week']
+        
+        # Categorize employees
+        categorized = []
+        
+        for _, row in comparison_df.iterrows():
+            # Use the actual column names from comparison_df - check what's available
+            emp_id = row.get('Employee ID', row.get('Employee_ID', None))
+            emp_name = row.get('Employee Name', row.get('Employee_Name', 'Unknown'))
+            
+            if emp_id is None:
+                print(f"Warning: Could not find Employee ID in row: {row.index.tolist()}")
+                continue
+                
+            # Get activity data
+            activity_data = timesheet_activity[timesheet_activity['Employee_ID'] == emp_id]
+            
+            category = "Unknown"
+            reason = ""
+            
+            # Check column availability with fallbacks
+            in_both = row.get('In Both Systems', row.get('In_Both', False))
+            has_timesheet = row.get('Has Timesheet Data', row.get('In_Timesheet', False))
+            has_payroll = row.get('Has Payroll Data', row.get('In_Payroll', False))
+            timesheet_hours = row.get('Timesheet Hours', row.get('Total Hours', 0))
+            payroll_hours = row.get('Payroll Hours Total', row.get('Total_Payroll_Hours', 0))
+            total_diff = row.get('Total Difference', row.get('Total_Difference', 0))
+            department = row.get('Department', 'Unknown')
+            
+            if in_both:
+                # Employee in both systems
+                if len(activity_data) > 0:
+                    week_count = activity_data.iloc[0]['Week_Count']
+                    total_hours = activity_data.iloc[0]['Total_Hours_Sum']
+                    
+                    if week_count >= 10 and total_hours > 100:  # Active threshold
+                        category = "Active"
+                        reason = f"Regular activity: {week_count} weeks, {total_hours:.0f} hours"
+                    elif week_count < 5 or total_hours < 50:  # Inactive threshold
+                        category = "Inactive/Minimal"
+                        reason = f"Limited activity: {week_count} weeks, {total_hours:.0f} hours"
+                    else:
+                        category = "Moderate Activity"
+                        reason = f"Moderate activity: {week_count} weeks, {total_hours:.0f} hours"
+                else:
+                    category = "Inactive/No Timesheet"
+                    reason = "No timesheet records found"
+                    
+            elif has_timesheet and not has_payroll:
+                # Timesheet only - might be new employee
+                if len(activity_data) > 0:
+                    week_count = activity_data.iloc[0]['Week_Count']
+                    first_week = activity_data.iloc[0]['First_Week']
+                    
+                    if first_week >= '2025-W01':  # Started in 2025
+                        category = "New Employee"
+                        reason = f"Started {first_week}, {week_count} weeks active"
+                    else:
+                        category = "Timesheet Only"
+                        reason = f"Active in timesheet ({week_count} weeks) but not in payroll"
+                else:
+                    category = "Timesheet Only"
+                    reason = "In timesheet but not payroll"
+                    
+            elif has_payroll and not has_timesheet:
+                # Payroll only - might be terminated employee
+                category = "Terminated/Payroll Only"
+                reason = "In payroll but no recent timesheet activity"
+            
+            categorized.append({
+                'Employee ID': emp_id,
+                'Employee Name': emp_name,
+                'Category': category,
+                'Reason': reason,
+                'Timesheet Hours': timesheet_hours,
+                'Payroll Hours Total': payroll_hours,
+                'Total Difference': total_diff,
+                'Department': department
+            })
+        
+        print(f"Successfully categorized {len(categorized)} employees")
+        return pd.DataFrame(categorized)
+        
+    except Exception as e:
+        print(f"Error in employee categorization: {str(e)}")
+        # Return empty dataframe on error
+        return pd.DataFrame(columns=['Employee ID', 'Employee Name', 'Category', 'Reason', 'Timesheet Hours', 'Payroll Hours Total', 'Total Difference', 'Department'])
+
+def generate_comparison_reports(comparison_report, anomalies, dept_summary, category_breakdown, stats, excel_filename, timesheet_df, payroll_df):
+    """Generate enhanced reports with employee categorization and comparison features."""
+    
+    # Extract date range from filename
+    payroll_period = extract_date_range_from_filename(excel_filename)
+    
+    # Get timesheet date range
+    timesheet_period = f"{timesheet_df['YearWeek'].min()} to {timesheet_df['YearWeek'].max()}"
+    
+    # Categorize employees
+    employee_categories = categorize_employees_by_activity(comparison_report, timesheet_df, payroll_df)
+    
+    # Create category summaries
+    category_summary = employee_categories.groupby('Category').agg({
+        'Employee ID': 'count',
+        'Timesheet Hours': 'sum',
+        'Payroll Hours Total': 'sum',
+        'Total Difference': 'sum'
+    }).reset_index()
+    category_summary.columns = ['Category', 'Employee Count', 'Total Timesheet Hours', 'Total Payroll Hours', 'Total Difference']
+    
+    # Enhanced statistics with period information
+    enhanced_stats = stats.copy()
+    enhanced_stats.update({
+        'payroll_period': payroll_period,
+        'timesheet_period': timesheet_period,
+        'period_mismatch': payroll_period != timesheet_period.replace('W', 'Week '),
+        'active_employees': len(employee_categories[employee_categories['Category'] == 'Active']),
+        'inactive_employees': len(employee_categories[employee_categories['Category'].str.contains('Inactive|Minimal')]),
+        'new_employees': len(employee_categories[employee_categories['Category'] == 'New Employee']),
+        'terminated_employees': len(employee_categories[employee_categories['Category'].str.contains('Terminated|Payroll Only')])
+    })
+    
+    # Create comparison metrics
+    comparison_metrics = {
+        'data_alignment': {
+            'timesheet_period': timesheet_period,
+            'payroll_period': payroll_period,
+            'period_match': not enhanced_stats['period_mismatch'],
+            'coverage_gap_explanation': 'Timesheet covers 71 weeks vs Payroll covers ~16 weeks'
+        },
+        'employee_status': {
+            'active': enhanced_stats['active_employees'],
+            'inactive_minimal': enhanced_stats['inactive_employees'], 
+            'new': enhanced_stats['new_employees'],
+            'terminated': enhanced_stats['terminated_employees']
+        }
+    }
+    
+    return comparison_report, anomalies, dept_summary, category_breakdown, enhanced_stats, employee_categories, category_summary, comparison_metrics
+
 def generate_detailed_reports(comparison_df, hour_categories, tolerance=2.0):
     """Generate reports with detailed hour category breakdown."""
     print("Generating detailed reports...")
@@ -354,34 +540,48 @@ def generate_detailed_reports(comparison_df, hour_categories, tolerance=2.0):
     
     return comparison_report, anomalies, dept_summary, category_breakdown, stats
 
-def save_detailed_results(comparison_report, anomalies, dept_summary, category_breakdown, stats):
-    """Save detailed results to Excel."""
+def save_detailed_results(comparison_report, anomalies, dept_summary, category_breakdown, stats, employee_categories=None, category_summary=None):
+    """Save all analysis results to Excel with multiple sheets including employee categorization."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"esker_lodge_detailed_comparison_{timestamp}.xlsx"
+    filename = f"esker_lodge_enhanced_analysis_{timestamp}.xlsx"
     
-    print(f"Saving detailed results to {filename}...")
-    
-    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-        # Main comparison with categories
-        comparison_report.to_excel(writer, sheet_name='Detailed Hours Comparison', index=False)
+    try:
+        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+            # Main comparison report
+            comparison_report.to_excel(writer, sheet_name='Employee_Comparison', index=False)
+            
+            # Employee categories (new sheet)
+            if employee_categories is not None:
+                employee_categories.to_excel(writer, sheet_name='Employee_Categories', index=False)
+            
+            # Category summary (new sheet)
+            if category_summary is not None:
+                category_summary.to_excel(writer, sheet_name='Category_Summary', index=False)
+            
+            # Anomalies and high discrepancies
+            if anomalies is not None and not anomalies.empty:
+                anomalies.to_excel(writer, sheet_name='Anomalies', index=False)
+            
+            # Department summary
+            if dept_summary is not None and not dept_summary.empty:
+                dept_summary.to_excel(writer, sheet_name='Department_Summary', index=False)
+            
+            # Hour category breakdown
+            if category_breakdown is not None and not category_breakdown.empty:
+                category_breakdown.to_excel(writer, sheet_name='Hour_Categories', index=False)
+            
+            # Statistics summary
+            stats_df = pd.DataFrame([stats])
+            stats_df.to_excel(writer, sheet_name='Statistics', index=False)
+            
+        print(f"✅ Enhanced results saved to: {filename}")
+        return filename
         
-        # Anomalies
-        anomalies.to_excel(writer, sheet_name='Anomalies', index=False)
-        
-        # Department summary
-        dept_summary.to_excel(writer, sheet_name='Department Summary', index=False)
-        
-        # Category breakdown
-        if category_breakdown is not None:
-            category_breakdown.to_excel(writer, sheet_name='Hour Category Breakdown', index=False)
-        
-        # Summary statistics
-        stats_df = pd.DataFrame([stats])
-        stats_df.to_excel(writer, sheet_name='Summary Statistics', index=False)
-    
-    return filename
+    except Exception as e:
+        print(f"❌ Error saving enhanced results: {str(e)}")
+        return None
 
-def display_statistics(stats):
+def display_enhanced_statistics(enhanced_stats, comparison_metrics):
     """Display enhanced analysis statistics."""
     print("\n" + "="*80)
     print("ENHANCED TIMESHEET vs PAYROLL ANALYSIS SUMMARY (Employee ID-based matching)")
@@ -389,31 +589,31 @@ def display_statistics(stats):
     
     # Overall Matching Statistics
     print(f"\n📊 MATCHING ANALYSIS:")
-    print(f"Total Employees Found: {stats['total_employees']}")
-    print(f"Employees in Both Systems: {stats['employees_in_both_systems']}")
-    print(f"Coverage Rate: {stats['coverage_rate']:.1f}%")
-    print(f"Employees Timesheet Only: {stats['employees_timesheet_only']}")
-    print(f"Employees Payroll Only: {stats['employees_payroll_only']}")
+    print(f"Total Employees Found: {enhanced_stats['total_employees']}")
+    print(f"Employees in Both Systems: {enhanced_stats['employees_in_both_systems']}")
+    print(f"Coverage Rate: {enhanced_stats['coverage_rate']:.1f}%")
+    print(f"Employees Timesheet Only: {enhanced_stats['employees_timesheet_only']}")
+    print(f"Employees Payroll Only: {enhanced_stats['employees_payroll_only']}")
     
     # Discrepancy Analysis
-    mismatch_rate = (stats['employees_with_mismatches'] / stats['employees_in_both_systems'] * 100) if stats['employees_in_both_systems'] > 0 else 0
+    mismatch_rate = (enhanced_stats['employees_with_mismatches'] / enhanced_stats['employees_in_both_systems'] * 100) if enhanced_stats['employees_in_both_systems'] > 0 else 0
     print(f"\n⚠️  DISCREPANCY ANALYSIS (for matched employees):")
-    print(f"Employees with Mismatches: {stats['employees_with_mismatches']}")
+    print(f"Employees with Mismatches: {enhanced_stats['employees_with_mismatches']}")
     print(f"Mismatch Rate: {mismatch_rate:.1f}%")
-    print(f"Tolerance Threshold: ±{stats['tolerance']} hours")
+    print(f"Tolerance Threshold: ±{enhanced_stats['tolerance']} hours")
     
     # Hour Totals
     print(f"\n🕐 HOUR TOTALS:")
-    print(f"Total Timesheet Hours: {stats['total_timesheet_hours']:,.1f}")
-    print(f"Total Payroll Hours: {stats['total_payroll_hours']:,.1f}")
-    print(f"Total Difference: {stats['total_difference']:,.1f} hours")
+    print(f"Total Timesheet Hours: {enhanced_stats['total_timesheet_hours']:,.1f}")
+    print(f"Total Payroll Hours: {enhanced_stats['total_payroll_hours']:,.1f}")
+    print(f"Total Difference: {enhanced_stats['total_difference']:,.1f} hours")
     
     # Impact Assessment
-    if stats['total_difference'] != 0:
-        if stats['total_difference'] > 0:
-            print(f"📈 Payroll exceeds timesheet by {abs(stats['total_difference']):,.1f} hours")
+    if enhanced_stats['total_difference'] != 0:
+        if enhanced_stats['total_difference'] > 0:
+            print(f"📈 Payroll exceeds timesheet by {abs(enhanced_stats['total_difference']):,.1f} hours")
         else:
-            print(f"📉 Timesheet exceeds payroll by {abs(stats['total_difference']):,.1f} hours")
+            print(f"📉 Timesheet exceeds payroll by {abs(enhanced_stats['total_difference']):,.1f} hours")
     
     print("="*80)
 
@@ -437,24 +637,38 @@ def main():
         comparison_report, anomalies, dept_summary, category_breakdown, stats = generate_detailed_reports(
             comparison_df, hour_categories, tolerance)
         
+        # Generate enhanced comparison reports with employee categorization
+        comparison_report, anomalies, dept_summary, category_breakdown, enhanced_stats, employee_categories, category_summary, comparison_metrics = generate_comparison_reports(
+            comparison_report, anomalies, dept_summary, category_breakdown, stats, excel_file, timesheet_df, payroll_df)
+        
         # Save results
-        output_file = save_detailed_results(comparison_report, anomalies, dept_summary, category_breakdown, stats)
+        output_file = save_detailed_results(comparison_report, anomalies, dept_summary, category_breakdown, enhanced_stats, employee_categories, category_summary)
         
         # Display statistics
-        display_statistics(stats)
+        display_enhanced_statistics(enhanced_stats, comparison_metrics)
         
         # Print summary
         print("\n" + "="*80)
-        print("ESKER LODGE - DETAILED HOURS COMPARISON SUMMARY")
+        print("ESKER LODGE - ENHANCED HOURS COMPARISON SUMMARY")
         print("="*80)
         
+        print(f"\nPeriod Analysis:")
+        print(f"  Timesheet Period: {enhanced_stats['timesheet_period']}")
+        print(f"  Payroll Period: {enhanced_stats['payroll_period']}")
+        print(f"  Period Alignment: {'❌ Mismatch' if enhanced_stats['period_mismatch'] else '✅ Aligned'}")
+        
+        print(f"\nEmployee Categorization:")
+        print(f"  Active Employees: {enhanced_stats['active_employees']}")
+        print(f"  Inactive/Minimal Activity: {enhanced_stats['inactive_employees']}")
+        print(f"  New Employees: {enhanced_stats['new_employees']}")
+        print(f"  Terminated/Payroll Only: {enhanced_stats['terminated_employees']}")
+        
         print(f"\nOverall Statistics:")
-        print(f"  Total Employees: {stats['total_employees']}")
-        print(f"  Employees with Mismatches (>{stats['tolerance']}h): {stats['employees_with_mismatches']}")
-        print(f"  Mismatch Rate: {stats['employees_with_mismatches']/stats['total_employees']*100:.1f}%")
-        print(f"  Total Timesheet Hours: {stats['total_timesheet_hours']:,.1f}")
-        print(f"  Total Payroll Hours: {stats['total_payroll_hours']:,.1f}")
-        print(f"  Total Difference: {stats['total_difference']:+,.1f} hours")
+        print(f"  Total Employees: {enhanced_stats['total_employees']}")
+        print(f"  Employees with Mismatches (>{enhanced_stats['tolerance']}h): {enhanced_stats['employees_with_mismatches']}")
+        print(f"  Total Timesheet Hours: {enhanced_stats['total_timesheet_hours']:,.1f}")
+        print(f"  Total Payroll Hours: {enhanced_stats['total_payroll_hours']:,.1f}")
+        print(f"  Total Difference: {enhanced_stats['total_difference']:+,.1f} hours")
         
         if hour_categories:
             print(f"\nHour Categories Tracked: {len(hour_categories)}")
@@ -463,15 +677,15 @@ def main():
                     total_hours = comparison_report[category].sum()
                     print(f"  {category}: {total_hours:,.1f} hours")
         
-        print(f"\n✅ Detailed analysis complete! Results saved to: {output_file}")
+        print(f"\n✅ Enhanced analysis complete! Results saved to: {output_file}")
         
-        return comparison_report, anomalies, dept_summary, category_breakdown
+        return comparison_report, anomalies, dept_summary, category_breakdown, enhanced_stats, employee_categories, category_summary, comparison_metrics
         
     except Exception as e:
-        print(f"❌ Error during detailed analysis: {str(e)}")
+        print(f"❌ Error during enhanced analysis: {str(e)}")
         import traceback
         traceback.print_exc()
-        return None, None, None, None
+        return None, None, None, None, None, None, None, None
 
 if __name__ == "__main__":
     main() 
