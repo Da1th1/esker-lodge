@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Streamlit Dashboard for Esker Lodge Nursing Home - Detailed Timesheet vs Payroll Hours Comparison
-================================================================================================
+Streamlit Dashboard for Esker Lodge Nursing Home - Enhanced Timesheet vs Payroll Hours Comparison
+==================================================================================================
 
 Interactive dashboard to explore discrepancies between timesheet and payroll data with detailed hour category breakdown.
+VERSION 2.1 - Enhanced with real-time refresh, improved performance, and better UX
 """
 
 import streamlit as st
@@ -13,14 +14,16 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import glob
-from datetime import datetime
+from datetime import datetime, timedelta
 import warnings
+import os
+import time
 
 warnings.filterwarnings('ignore')
 
 # Page configuration
 st.set_page_config(
-    page_title="Esker Lodge - Detailed Hours Comparison Dashboard",
+    page_title="Esker Lodge - Enhanced Hours Comparison Dashboard",
     page_icon="🏥",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -34,9 +37,51 @@ HOUR_CATEGORIES = [
     'Cross Function Day2', 'Cross Function Sun1', 'Training/Meeting', 'Statutory Sick Pay'
 ]
 
-@st.cache_data
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .metric-container {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 0.5rem 0;
+    }
+    .alert-high {
+        background-color: #ffebee;
+        border-left: 5px solid #f44336;
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
+    .alert-medium {
+        background-color: #fff3e0;
+        border-left: 5px solid #ff9800;
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
+    .alert-low {
+        background-color: #e8f5e8;
+        border-left: 5px solid #4caf50;
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
+    .data-freshness {
+        font-size: 0.8rem;
+        color: #666;
+        text-align: right;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_comparison_data():
-    """Load the most recent detailed comparison file."""
+    """Load the most recent detailed comparison file with improved caching."""
     try:
         # Look for detailed comparison files first
         files = glob.glob("esker_lodge_detailed_comparison_*.xlsx")
@@ -47,15 +92,21 @@ def load_comparison_data():
         if not files:
             return create_sample_data()
         
-        latest_file = max(files)
+        latest_file = max(files, key=os.path.getctime)
+        file_time = datetime.fromtimestamp(os.path.getctime(latest_file))
         
-        # Load all sheets
+        # Load all sheets with error handling
         sheets = {}
-        with pd.ExcelFile(latest_file) as xls:
-            for sheet_name in xls.sheet_names:
-                sheets[sheet_name] = pd.read_excel(xls, sheet_name=sheet_name)
+        try:
+            with pd.ExcelFile(latest_file) as xls:
+                for sheet_name in xls.sheet_names:
+                    sheets[sheet_name] = pd.read_excel(xls, sheet_name=sheet_name)
+            
+            return sheets, latest_file, file_time
+        except Exception as e:
+            st.warning(f"Error reading Excel file: {str(e)}. Using sample data.")
+            return create_sample_data()
         
-        return sheets, latest_file
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
         return create_sample_data()
@@ -160,10 +211,27 @@ def create_sample_data():
         'Hour Category Breakdown': category_breakdown_df
     }
     
-    return sheets, "Sample Data (Demo Mode)"
+    return sheets, "Sample Data (Demo Mode)", datetime.now()
+
+def create_data_freshness_indicator(file_time):
+    """Create a data freshness indicator."""
+    now = datetime.now()
+    time_diff = now - file_time
+    
+    if time_diff < timedelta(hours=1):
+        color = "🟢"
+        status = "Fresh"
+    elif time_diff < timedelta(hours=24):
+        color = "🟡"
+        status = "Recent"
+    else:
+        color = "🔴"
+        status = "Outdated"
+    
+    return f"{color} Data {status} ({file_time.strftime('%Y-%m-%d %H:%M')})"
 
 def create_overview_metrics(comparison_df, anomalies_df):
-    """Create overview metrics cards."""
+    """Create enhanced overview metrics cards."""
     total_employees = len(comparison_df)
     employees_with_mismatches = len(anomalies_df)
     mismatch_rate = (employees_with_mismatches / total_employees * 100) if total_employees > 0 else 0
@@ -172,28 +240,33 @@ def create_overview_metrics(comparison_df, anomalies_df):
     total_payroll_hours = comparison_df['Payroll Hours Total'].sum()
     total_difference = comparison_df['Total Difference'].sum()
     
+    # Create 4 main metrics
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.metric(
-            label="Total Employees",
+            label="👥 Total Employees",
             value=f"{total_employees:,}",
             help="Total unique employees in the analysis"
         )
     
     with col2:
+        delta_color = "inverse" if mismatch_rate > 50 else "normal"
         st.metric(
-            label="Mismatch Rate",
+            label="⚠️ Mismatch Rate",
             value=f"{mismatch_rate:.1f}%",
             delta=f"{employees_with_mismatches} employees",
-            delta_color="inverse",
+            delta_color=delta_color,
             help="Percentage of employees with discrepancies > 2 hours"
         )
     
     with col3:
+        delta_color = "inverse" if abs(total_difference) > 1000 else "normal"
         st.metric(
-            label="Total Hours Difference",
+            label="📊 Total Hours Difference",
             value=f"{total_difference:+,.0f}",
+            delta=f"{abs(total_difference)/total_employees:.1f} avg per employee",
+            delta_color=delta_color,
             help="Net difference between payroll and timesheet hours"
         )
     
@@ -201,10 +274,31 @@ def create_overview_metrics(comparison_df, anomalies_df):
         coverage_rate = len(comparison_df[(comparison_df['Timesheet Hours'] > 0) & 
                                         (comparison_df['Payroll Hours Total'] > 0)]) / total_employees * 100
         st.metric(
-            label="Data Coverage",
+            label="📈 Data Coverage",
             value=f"{coverage_rate:.1f}%",
+            delta=f"{total_timesheet_hours:,.0f} timesheet hrs",
             help="Percentage of employees present in both systems"
         )
+    
+    # Additional summary metrics
+    st.markdown("---")
+    col5, col6, col7, col8 = st.columns(4)
+    
+    with col5:
+        avg_timesheet = total_timesheet_hours / total_employees
+        st.metric("🕐 Avg Timesheet Hours", f"{avg_timesheet:.1f}")
+    
+    with col6:
+        avg_payroll = total_payroll_hours / total_employees  
+        st.metric("💰 Avg Payroll Hours", f"{avg_payroll:.1f}")
+    
+    with col7:
+        zero_timesheet = len(comparison_df[comparison_df['Timesheet Hours'] == 0])
+        st.metric("❌ Missing Timesheet", f"{zero_timesheet}")
+    
+    with col8:
+        zero_payroll = len(comparison_df[comparison_df['Payroll Hours Total'] == 0])
+        st.metric("❌ Missing Payroll", f"{zero_payroll}")
 
 def create_department_analysis(comparison_df, anomalies_df):
     """Create department-level analysis."""
@@ -348,7 +442,7 @@ def create_data_quality_analysis(comparison_df):
             )
 
 def create_scatter_plot(comparison_df):
-    """Create scatter plot of timesheet vs payroll hours."""
+    """Create enhanced scatter plot of timesheet vs payroll hours."""
     st.subheader("📈 Timesheet vs Payroll Hours Correlation")
     
     # Filter out zero values for better visualization
@@ -359,6 +453,7 @@ def create_scatter_plot(comparison_df):
         # Use absolute value of difference for size (Plotly requires non-negative values)
         filtered_df['Abs_Difference'] = filtered_df['Total Difference'].abs()
         
+        # Enhanced scatter plot with better styling
         fig = px.scatter(
             filtered_df,
             x='Timesheet Hours',
@@ -366,12 +461,13 @@ def create_scatter_plot(comparison_df):
             color='Department',
             size='Abs_Difference',
             hover_data=['Employee Name', 'Total Difference'],
-            title="Timesheet Hours vs Payroll Hours by Department",
+            title="🔍 Timesheet Hours vs Payroll Hours by Department",
             labels={
                 'Timesheet Hours': 'Timesheet Hours',
                 'Payroll Hours Total': 'Payroll Hours Total',
                 'Abs_Difference': 'Absolute Difference'
-            }
+            },
+            color_discrete_sequence=px.colors.qualitative.Set3
         )
         
         # Add perfect correlation line
@@ -381,57 +477,165 @@ def create_scatter_plot(comparison_df):
                 x=[0, max_hours],
                 y=[0, max_hours],
                 mode='lines',
-                name='Perfect Match',
-                line=dict(dash='dash', color='red')
+                name='Perfect Match Line',
+                line=dict(dash='dash', color='red', width=2)
             )
         )
         
-        fig.update_layout(height=600)
+        # Enhanced styling
+        fig.update_layout(
+            height=600,
+            showlegend=True,
+            hovermode='closest',
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)'
+        )
+        
+        fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
+        fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
+        
         st.plotly_chart(fig, use_container_width=True)
         
+        # Correlation statistics
+        col1, col2, col3 = st.columns(3)
+        
+        correlation = filtered_df['Timesheet Hours'].corr(filtered_df['Payroll Hours Total'])
+        with col1:
+            st.metric("📊 Correlation Coefficient", f"{correlation:.3f}")
+        
+        rmse = np.sqrt(np.mean((filtered_df['Timesheet Hours'] - filtered_df['Payroll Hours Total'])**2))
+        with col2:
+            st.metric("📏 RMSE", f"{rmse:.1f} hours")
+        
+        with col3:
+            perfect_matches = len(filtered_df[filtered_df['Abs_Difference'] <= 2])
+            match_rate = perfect_matches / len(filtered_df) * 100
+            st.metric("🎯 Match Rate (±2h)", f"{match_rate:.1f}%")
+        
         # Add explanation
-        st.info("💡 **Chart Info:** Point size represents the absolute difference between timesheet and payroll hours. Hover over points to see employee details and actual difference values.")
+        st.info("💡 **Chart Info:** Point size represents the absolute difference between timesheet and payroll hours. Points closer to the red dashed line indicate better matches between the two systems.")
     else:
         st.warning("No data available for correlation analysis")
 
 def create_distribution_analysis(comparison_df):
-    """Create distribution analysis of differences."""
-    st.subheader("📊 Distribution of Hour Differences")
+    """Create enhanced distribution analysis of differences."""
+    st.subheader("📊 Enhanced Distribution Analysis")
     
-    # Filter out extreme outliers for better visualization
     differences = comparison_df['Total Difference']
-    q1, q3 = differences.quantile([0.25, 0.75])
-    iqr = q3 - q1
-    lower_bound = q1 - 1.5 * iqr
-    upper_bound = q3 + 1.5 * iqr
     
-    filtered_differences = differences[(differences >= lower_bound) & (differences <= upper_bound)]
+    # Create tabs for different views
+    tab1, tab2, tab3 = st.tabs(["📈 Distribution", "🏢 By Department", "📋 Statistics"])
     
-    col1, col2 = st.columns(2)
+    with tab1:
+        # Filter out extreme outliers for better visualization
+        q1, q3 = differences.quantile([0.25, 0.75])
+        iqr = q3 - q1
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+        
+        filtered_differences = differences[(differences >= lower_bound) & (differences <= upper_bound)]
+        outliers = differences[(differences < lower_bound) | (differences > upper_bound)]
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Enhanced histogram with better styling
+            fig_hist = px.histogram(
+                x=filtered_differences,
+                nbins=30,
+                title="📊 Distribution of Hour Differences (Outliers Removed)",
+                labels={'x': 'Hour Difference (Payroll - Timesheet)', 'y': 'Count of Employees'},
+                color_discrete_sequence=['#3498db']
+            )
+            fig_hist.add_vline(x=0, line_dash="dash", line_color="red", line_width=2,
+                              annotation_text="Perfect Match", annotation_position="top")
+            fig_hist.add_vline(x=differences.mean(), line_dash="dot", line_color="green", line_width=2,
+                              annotation_text=f"Mean: {differences.mean():.1f}h", annotation_position="top right")
+            
+            fig_hist.update_layout(
+                showlegend=False,
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)'
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
+        
+        with col2:
+            # Box plot with enhanced styling
+            fig_box = px.box(
+                y=filtered_differences,
+                title="📦 Box Plot of Hour Differences",
+                labels={'y': 'Hour Difference (Payroll - Timesheet)'},
+                color_discrete_sequence=['#e74c3c']
+            )
+            fig_box.add_hline(y=0, line_dash="dash", line_color="red", line_width=2,
+                             annotation_text="Perfect Match")
+            
+            fig_box.update_layout(
+                showlegend=False,
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)'
+            )
+            st.plotly_chart(fig_box, use_container_width=True)
+        
+        # Outlier information
+        if len(outliers) > 0:
+            st.warning(f"⚠️ **Outliers Detected:** {len(outliers)} employees with extreme differences (>{upper_bound:.1f}h or <{lower_bound:.1f}h)")
     
-    with col1:
-        # Histogram of differences
-        fig_hist = px.histogram(
-            x=filtered_differences,
-            nbins=30,
-            title="Distribution of Hour Differences",
-            labels={'x': 'Hour Difference (Payroll - Timesheet)', 'y': 'Count'}
-        )
-        fig_hist.add_vline(x=0, line_dash="dash", line_color="red", 
-                          annotation_text="Perfect Match")
-        st.plotly_chart(fig_hist, use_container_width=True)
-    
-    with col2:
-        # Box plot by department
-        fig_box = px.box(
+    with tab2:
+        # Enhanced box plot by department
+        fig_dept = px.box(
             comparison_df,
             x='Department',
             y='Total Difference',
-            title="Hour Differences by Department"
+            title="📊 Hour Differences by Department",
+            color='Department',
+            color_discrete_sequence=px.colors.qualitative.Set3
         )
-        fig_box.update_xaxes(tickangle=45)
-        fig_box.update_layout(height=400)
-        st.plotly_chart(fig_box, use_container_width=True)
+        fig_dept.add_hline(y=0, line_dash="dash", line_color="red", line_width=2)
+        fig_dept.update_xaxes(tickangle=45)
+        fig_dept.update_layout(
+            height=500,
+            showlegend=False,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)'
+        )
+        st.plotly_chart(fig_dept, use_container_width=True)
+    
+    with tab3:
+        # Detailed statistics
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("### 📊 Descriptive Statistics")
+            stats_df = pd.DataFrame({
+                'Statistic': ['Count', 'Mean', 'Median', 'Std Dev', 'Min', 'Max', 'Q1', 'Q3'],
+                'Value': [
+                    f"{len(differences):,}",
+                    f"{differences.mean():.2f}",
+                    f"{differences.median():.2f}",
+                    f"{differences.std():.2f}",
+                    f"{differences.min():.2f}",
+                    f"{differences.max():.2f}",
+                    f"{differences.quantile(0.25):.2f}",
+                    f"{differences.quantile(0.75):.2f}"
+                ]
+            })
+            st.dataframe(stats_df, use_container_width=True)
+        
+        with col2:
+            st.markdown("### 🎯 Tolerance Analysis")
+            tolerance_data = []
+            for tolerance in [1, 2, 5, 10, 20]:
+                within_tolerance = len(differences[abs(differences) <= tolerance])
+                percentage = within_tolerance / len(differences) * 100
+                tolerance_data.append({
+                    'Tolerance (±hours)': tolerance,
+                    'Employees Within': within_tolerance,
+                    'Percentage': f"{percentage:.1f}%"
+                })
+            
+            tolerance_df = pd.DataFrame(tolerance_data)
+            st.dataframe(tolerance_df, use_container_width=True)
 
 def create_detailed_search(comparison_df):
     """Create detailed employee search functionality."""
@@ -724,13 +928,37 @@ def create_top_category_employees(comparison_df):
             )
 
 def main():
-    """Main dashboard function."""
-    st.title("🏥 Esker Lodge Nursing Home")
-    st.title("Detailed Timesheet vs Payroll Hours Comparison Dashboard")
+    """Main dashboard function with enhanced features."""
+    # Header with styling
+    st.markdown('<h1 class="main-header">🏥 Esker Lodge Nursing Home</h1>', unsafe_allow_html=True)
+    st.markdown('<h2 class="main-header" style="font-size: 1.8rem;">Enhanced Timesheet vs Payroll Hours Comparison Dashboard</h2>', unsafe_allow_html=True)
     
     # Load data
-    with st.spinner("Loading comparison data..."):
-        sheets, filename = load_comparison_data()
+    with st.spinner("🔄 Loading comparison data..."):
+        sheets, filename, file_time = load_comparison_data()
+    
+    # Data freshness indicator
+    freshness_indicator = create_data_freshness_indicator(file_time)
+    
+    # Top bar with refresh and data info
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        st.markdown(f"**{freshness_indicator}**")
+    with col2:
+        if st.button("🔄 Refresh Data", help="Reload the latest data files"):
+            st.cache_data.clear()
+            st.rerun()
+    with col3:
+        if st.button("📊 Run New Analysis", help="Generate fresh analysis from source data"):
+            with st.spinner("Running detailed analysis..."):
+                result = os.system("python3 timesheet_payroll_comparison_detailed.py")
+                if result == 0:
+                    st.success("✅ Analysis complete! Refreshing dashboard...")
+                    st.cache_data.clear()
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.error("❌ Error running analysis. Please check source data files.")
     
     # Check if we're using sample data
     if filename == "Sample Data (Demo Mode)":
@@ -742,87 +970,160 @@ def main():
     dept_summary = sheets['Department Summary']
     category_breakdown_df = sheets.get('Hour Category Breakdown', pd.DataFrame())
     
-    # Sidebar
-    st.sidebar.title("📊 Dashboard Navigation")
-    st.sidebar.info(f"**Data Source:** {filename}")
-    st.sidebar.info(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # Sidebar with enhanced navigation
+    st.sidebar.markdown("### 📊 Dashboard Navigation")
+    st.sidebar.markdown(f"**📁 Data Source:** `{os.path.basename(filename)}`")
+    st.sidebar.markdown(f"**🕐 Last Updated:** {file_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Critical alerts in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🚨 Critical Alerts")
+    
+    mismatch_rate = len(anomalies_df) / len(comparison_df) * 100 if len(comparison_df) > 0 else 0
+    total_difference = comparison_df['Total Difference'].sum()
+    
+    if mismatch_rate > 80:
+        st.sidebar.markdown('<div class="alert-high">🔴 <strong>HIGH:</strong> Mismatch rate >80%</div>', unsafe_allow_html=True)
+    elif mismatch_rate > 50:
+        st.sidebar.markdown('<div class="alert-medium">🟡 <strong>MEDIUM:</strong> Mismatch rate >50%</div>', unsafe_allow_html=True)
+    else:
+        st.sidebar.markdown('<div class="alert-low">🟢 <strong>LOW:</strong> Mismatch rate <50%</div>', unsafe_allow_html=True)
+    
+    if abs(total_difference) > 10000:
+        st.sidebar.markdown('<div class="alert-high">🔴 <strong>HIGH:</strong> >10k hour difference</div>', unsafe_allow_html=True)
+    elif abs(total_difference) > 5000:
+        st.sidebar.markdown('<div class="alert-medium">🟡 <strong>MEDIUM:</strong> >5k hour difference</div>', unsafe_allow_html=True)
+    
+    # Add quick stats in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📈 Quick Stats")
+    st.sidebar.metric("Employees", len(comparison_df))
+    st.sidebar.metric("Mismatches", len(anomalies_df))
+    st.sidebar.metric("Total Diff", f"{total_difference:+,.0f}h")
     
     # Add instructions for real data in sidebar if using sample data
     if filename == "Sample Data (Demo Mode)":
         st.sidebar.markdown("---")
         st.sidebar.markdown("### 📁 To Use Real Data:")
-        st.sidebar.markdown("1. Run `python timesheet_payroll_comparison_detailed.py`")
-        st.sidebar.markdown("2. Upload the generated Excel file")
-        st.sidebar.markdown("3. Refresh the dashboard")
+        st.sidebar.markdown("1. ▶️ Click 'Run New Analysis'")
+        st.sidebar.markdown("2. ⏳ Wait for completion")
+        st.sidebar.markdown("3. 🔄 Dashboard auto-refreshes")
     
-    # Navigation
-    page = st.sidebar.selectbox(
+    # Enhanced navigation with icons and descriptions
+    st.sidebar.markdown("---")
+    page_options = {
+        "🏠 Overview": "Executive summary and key metrics",
+        "🕒 Hour Categories": "Detailed breakdown by hour types", 
+        "📊 Category Differences": "Discrepancy analysis by category",
+        "👥 Top Employees": "Employee analysis by category",
+        "🏢 Departments": "Department-level analysis",
+        "👤 Employee Details": "Individual employee analysis",
+        "🔍 Data Quality": "Data completeness and integrity",
+        "📈 Correlations": "Statistical analysis and trends",
+        "🔎 Search & Filter": "Advanced employee search",
+        "💡 Recommendations": "Actionable insights and next steps"
+    }
+    
+    # Create selectbox with descriptions
+    page_selection = st.sidebar.selectbox(
         "Select Analysis View:",
-        ["Overview", "Hour Category Analysis", "Category Differences", "Top Category Employees", 
-         "Department Analysis", "Employee Analysis", "Data Quality", 
-         "Correlation Analysis", "Employee Search", "Recommendations"]
+        options=list(page_options.keys()),
+        format_func=lambda x: x,
+        help="Choose the analysis view you want to explore"
     )
+    
+    # Show page description
+    page = page_selection.split(" ", 1)[1]  # Remove emoji
+    st.sidebar.markdown(f"*{page_options[page_selection]}*")
     
     # Overview metrics (always shown)
     create_overview_metrics(comparison_df, anomalies_df)
     st.divider()
     
-    # Page content based on selection
-    if page == "Overview":
+    # Page content based on selection with enhanced styling
+    if "Overview" in page_selection:
         st.subheader("📋 Executive Summary")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            st.info(f"""
-            **Key Findings:**
-            - {len(comparison_df)} total employees analyzed
-            - {len(anomalies_df)} employees with significant discrepancies (>{2} hours)
-            - {len(comparison_df[comparison_df['Timesheet Hours'] == 0])} employees missing from timesheet
-            - {len(comparison_df[comparison_df['Payroll Hours Total'] == 0])} employees missing from payroll
-            """)
+        # Create tabs for different overview sections
+        tab1, tab2, tab3 = st.tabs(["📊 Key Metrics", "📈 Trends", "🎯 Focus Areas"])
         
-        with col2:
-            total_diff = comparison_df['Total Difference'].sum()
-            if total_diff > 0:
-                st.warning(f"**Net Difference:** +{total_diff:,.0f} hours (Payroll > Timesheet)")
-            else:
-                st.warning(f"**Net Difference:** {total_diff:,.0f} hours (Timesheet > Payroll)")
+        with tab1:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info(f"""
+                **🔍 Analysis Results:**
+                - 👥 {len(comparison_df)} total employees analyzed
+                - ⚠️ {len(anomalies_df)} employees with significant discrepancies (>2 hours)
+                - 📊 {mismatch_rate:.1f}% overall mismatch rate
+                - 🕐 {comparison_df['Timesheet Hours'].sum():,.0f} total timesheet hours
+                - 💰 {comparison_df['Payroll Hours Total'].sum():,.0f} total payroll hours
+                """)
+            
+            with col2:
+                total_diff = comparison_df['Total Difference'].sum()
+                if total_diff > 0:
+                    st.warning(f"""
+                    **⚠️ Discrepancy Alert:**
+                    - 📈 Net Difference: +{total_diff:,.0f} hours
+                    - 📊 Direction: Payroll > Timesheet
+                    - 💰 Potential financial impact
+                    - 🔍 Requires investigation
+                    """)
+                else:
+                    st.warning(f"""
+                    **⚠️ Discrepancy Alert:**
+                    - 📉 Net Difference: {total_diff:,.0f} hours  
+                    - 📊 Direction: Timesheet > Payroll
+                    - 💰 Potential underpayment risk
+                    - 🔍 Requires immediate attention
+                    """)
         
-        # Quick charts
-        create_distribution_analysis(comparison_df)
+        with tab2:
+            create_distribution_analysis(comparison_df)
         
-    elif page == "Hour Category Analysis":
+        with tab3:
+            create_recommendations()
+        
+    elif "Hour Categories" in page_selection:
         create_hour_category_analysis(comparison_df, category_breakdown_df)
         
-    elif page == "Category Differences":
+    elif "Category Differences" in page_selection:
         create_category_difference_analysis(comparison_df)
         
-    elif page == "Top Category Employees":
+    elif "Top Employees" in page_selection:
         create_top_category_employees(comparison_df)
         
-    elif page == "Department Analysis":
+    elif "Departments" in page_selection:
         create_department_analysis(comparison_df, anomalies_df)
         
-    elif page == "Employee Analysis":
+    elif "Employee Details" in page_selection:
         create_employee_analysis(comparison_df, anomalies_df)
         
-    elif page == "Data Quality":
+    elif "Data Quality" in page_selection:
         create_data_quality_analysis(comparison_df)
         
-    elif page == "Correlation Analysis":
+    elif "Correlations" in page_selection:
         create_scatter_plot(comparison_df)
         create_distribution_analysis(comparison_df)
         
-    elif page == "Employee Search":
+    elif "Search & Filter" in page_selection:
         create_detailed_search(comparison_df)
         
-    elif page == "Recommendations":
+    elif "Recommendations" in page_selection:
         create_recommendations()
     
-    # Footer
+    # Enhanced footer with additional info
     st.divider()
-    st.caption(f"Dashboard generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
-              f"Data from {filename}")
+    footer_col1, footer_col2, footer_col3 = st.columns(3)
+    
+    with footer_col1:
+        st.caption(f"🕐 Dashboard generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    with footer_col2:
+        st.caption(f"📊 Data from: {os.path.basename(filename)}")
+    
+    with footer_col3:
+        st.caption(f"📈 Version 2.1 - Enhanced Analytics")
 
 if __name__ == "__main__":
     main() 

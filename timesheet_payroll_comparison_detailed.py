@@ -37,8 +37,11 @@ def load_and_clean_timesheet_data(csv_file):
     df = pd.read_csv(csv_file)
     print(f"Original timesheet data shape: {df.shape}")
     
-    # Clean employee names
+    # Clean employee names (keep for reference)
     df['Name_Cleaned'] = df['Name'].apply(clean_name)
+    
+    # Use Employee ID as primary key, clean it
+    df['Employee_ID'] = pd.to_numeric(df['Staff Number'], errors='coerce')
     
     # Convert time format to decimal hours
     def convert_time_to_hours(time_str):
@@ -63,11 +66,12 @@ def load_and_clean_timesheet_data(csv_file):
     
     df['Total Hours'] = df['Total Hours'].apply(convert_time_to_hours)
     
-    # Remove invalid entries
-    df = df.dropna(subset=['Name_Cleaned'])
-    df = df[df['Name_Cleaned'] != '']
+    # Remove invalid entries - now using Employee_ID as primary filter
+    df = df.dropna(subset=['Employee_ID'])
+    df = df[df['Employee_ID'] > 0]  # Valid employee IDs should be positive
     
     print(f"Cleaned timesheet data shape: {df.shape}")
+    print(f"Unique Employee IDs in timesheet: {df['Employee_ID'].nunique()}")
     
     return df
 
@@ -75,54 +79,81 @@ def load_and_clean_payroll_data_detailed(excel_file, sheet_name):
     """Load payroll data with detailed hour category breakdown."""
     print("Loading detailed payroll data...")
     
-    # Load with no header to see the structure
-    df_raw = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
-    
-    # Get hour type names from row 3 (index 2)
-    hour_types = df_raw.iloc[2].tolist()
-    
-    # Get column indicators from row 4 (index 3) 
-    column_types = df_raw.iloc[3].tolist()
-    
-    # Load data starting from row 5 (index 4)
-    df = pd.read_excel(excel_file, sheet_name=sheet_name, header=4)
+    # Load data with header in row 0
+    df = pd.read_excel(excel_file, sheet_name=sheet_name, header=0)
     
     print(f"Original payroll data shape: {df.shape}")
+    print(f"Excel columns: {df.columns.tolist()[:10]}")
     
-    # Create full name
+    # Create full name (keep for reference)
     df['Full_Name'] = df['Forename'].astype(str) + ' ' + df['Surname'].astype(str)
     df['Name_Cleaned'] = df['Full_Name'].apply(clean_name)
     
-    # Remove invalid entries
-    df = df.dropna(subset=['Name_Cleaned'])
-    df = df[df['Name_Cleaned'] != '']
+    # Use Employee ID as primary key - clean the Sequence column
+    df['Employee_ID'] = pd.to_numeric(df['Sequence'], errors='coerce')
+    
+    # Remove invalid entries - now using Employee_ID as primary filter
+    df = df.dropna(subset=['Employee_ID'])
+    df = df[df['Employee_ID'] > 0]  # Valid employee IDs should be positive
     df = df[df['Name_Cleaned'] != 'Nan Nan']
+    
+    print(f"Unique Employee IDs in payroll: {df['Employee_ID'].nunique()}")
+    print(f"Sample Employee IDs: {sorted(df['Employee_ID'].unique())[:10]}")
     
     # Map hour categories to their corresponding columns
     hour_categories = {}
     
-    # Define the expected hour categories and their column mappings
-    expected_categories = [
-        'Day Rate', 'Night Rate', 'Sat Day', 'Sat Night', 'Sun Day', 'Sun Night',
-        'Old Day/Sat Rate', 'Old Night Rate', 'Old Sun Rate', 'Extra Shift Bonus',
-        'Backpay', 'Bank Holiday', 'Holiday Pay', 'Cross Function Day1', 
-        'Cross Function Day2', 'Cross Function Sun1', 'Training/Meeting', 'Statutory Sick Pay'
-    ]
+    # Map all hour categories (non-Gross columns) based on the actual Excel structure
+    for col in df.columns:
+        col_str = str(col).strip()
+        # Skip gross pay columns
+        if 'Gross' in col_str:
+            continue
+        # Skip employee info columns
+        if col_str in ['Depart', 'Sequence', 'Forename', 'Surname']:
+            continue
+            
+        # Map to appropriate category names
+        if col_str == 'Basic':
+            hour_categories['Basic Hours'] = col
+        elif col_str == 'Night Rate':
+            hour_categories['Night Rate Hours'] = col
+        elif col_str == 'Saturday Rate':
+            hour_categories['Saturday Day Hours'] = col
+        elif col_str == 'Saturday Night Rate':
+            hour_categories['Saturday Night Hours'] = col
+        elif col_str == 'Sunday Rate':
+            hour_categories['Sunday Day Hours'] = col
+        elif col_str == 'Sunday Night Rate':
+            hour_categories['Sunday Night Hours'] = col
+        elif col_str == 'Old Day/Sat Rate':
+            hour_categories['Old Day/Saturday Rate Hours'] = col
+        elif col_str == 'Old Night Rate':
+            hour_categories['Old Night Rate Hours'] = col
+        elif col_str == 'Old Sun Rate':
+            hour_categories['Old Sunday Rate Hours'] = col
+        elif col_str == 'Non-Rostered Day':
+            hour_categories['Non-Rostered Day Hours'] = col
+        elif col_str == 'Backpay':
+            hour_categories['Backpay Hours'] = col
+        elif col_str == 'Public Holiday Entitlement':
+            hour_categories['Public Holiday Hours'] = col
+        elif col_str == 'Holidays':
+            hour_categories['Holiday Hours'] = col
+        elif col_str == 'Cross Function Day1':
+            hour_categories['Cross Function Day1 Hours'] = col
+        elif col_str == 'Cross Function Day2':
+            hour_categories['Cross Function Day2 Hours'] = col
+        elif col_str == 'Cross Function Sun1':
+            hour_categories['Cross Function Sun1 Hours'] = col
+        elif col_str == 'Training/Meetings':
+            hour_categories['Training/Meeting Hours'] = col
+        elif col_str == 'Statutory Sick':
+            hour_categories['Statutory Sick Pay Hours'] = col
     
-    # Find hour columns by looking for 'Hrs' in column names
-    hour_columns = [col for col in df.columns if 'Hrs' in str(col)]
-    
-    # Map categories to hour columns
-    category_idx = 0
-    for i, col in enumerate(df.columns):
-        if col in hour_columns:
-            # Find the corresponding category from the header rows
-            if category_idx < len(expected_categories):
-                category_name = expected_categories[category_idx]
-                hour_categories[category_name] = col
-                category_idx += 1
-    
-    print(f"Hour category mappings: {hour_categories}")
+    print(f"Hour category mappings found: {len(hour_categories)}")
+    for category, col in hour_categories.items():
+        print(f"  {category}: {col}")
     
     # Convert hour columns to numeric
     for category, col in hour_categories.items():
@@ -135,40 +166,51 @@ def load_and_clean_payroll_data_detailed(excel_file, sheet_name):
     
     if existing_hour_cols:
         df['Total_Payroll_Hours'] = df[existing_hour_cols].sum(axis=1)
+        print(f"Calculated total hours using {len(existing_hour_cols)} hour columns")
     else:
         df['Total_Payroll_Hours'] = 0
+        print("Warning: No hour columns found for calculation")
     
     print(f"Cleaned payroll data shape: {df.shape}")
+    print(f"Sample total hours: {df['Total_Payroll_Hours'].head().tolist()}")
     
-    # Store category mappings for later use - use a different approach since pandas doesn't allow direct attribute assignment
     return df, hour_categories
 
 def compare_hours_detailed(timesheet_df, payroll_df, hour_categories, tolerance=2.0):
-    """Compare hours with detailed category breakdown."""
-    print("Comparing hours with detailed breakdown...")
+    """Compare hours with detailed category breakdown using Employee IDs."""
+    print("Comparing hours with detailed breakdown using Employee IDs...")
     
-    # Aggregate timesheet data by name
-    timesheet_total = timesheet_df.groupby('Name_Cleaned').agg({
+    # Aggregate timesheet data by Employee_ID
+    timesheet_total = timesheet_df.groupby('Employee_ID').agg({
         'Total Hours': 'sum',
-        'Department Name': 'first'
+        'Department Name': 'first',
+        'Name_Cleaned': 'first'  # Keep name for reference
     }).reset_index()
     
-    # For payroll, we need to aggregate both totals and categories
-    payroll_agg_data = {'Total_Payroll_Hours': 'sum', 'Depart': 'first'}
+    # For payroll, we need to aggregate both totals and categories by Employee_ID
+    payroll_agg_data = {
+        'Total_Payroll_Hours': 'sum', 
+        'Depart': 'first',
+        'Name_Cleaned': 'first'  # Keep name for reference
+    }
     
     # Add hour categories to aggregation using the actual column names (Hrs, Hrs.1, etc.)
     for category, col in hour_categories.items():
         if col in payroll_df.columns:
             payroll_agg_data[col] = 'sum'  # Use actual column name, not renamed
     
-    payroll_agg = payroll_df.groupby('Name_Cleaned').agg(payroll_agg_data).reset_index()
+    payroll_agg = payroll_df.groupby('Employee_ID').agg(payroll_agg_data).reset_index()
     
-    # Merge datasets
-    comparison = pd.merge(timesheet_total, payroll_agg, on='Name_Cleaned', how='outer')
+    # Merge datasets on Employee_ID
+    comparison = pd.merge(timesheet_total, payroll_agg, on='Employee_ID', how='outer')
     
     # Fill missing values
     comparison['Total Hours'] = comparison['Total Hours'].fillna(0)
     comparison['Total_Payroll_Hours'] = comparison['Total_Payroll_Hours'].fillna(0)
+    
+    # Use names for display (prefer timesheet name, fallback to payroll name)
+    comparison['Employee_Name'] = comparison['Name_Cleaned_x'].fillna(comparison['Name_Cleaned_y'])
+    comparison['Employee_Name'] = comparison['Employee_Name'].fillna('Unknown Employee')
     
     # Calculate total difference
     comparison['Total_Difference'] = comparison['Total_Payroll_Hours'] - comparison['Total Hours']
@@ -177,13 +219,22 @@ def compare_hours_detailed(timesheet_df, payroll_df, hour_categories, tolerance=
     # Flag mismatches
     comparison['Mismatch'] = comparison['Abs_Total_Difference'] > tolerance
     
-    # Clean up department names
+    # Clean up department names (prefer timesheet dept, fallback to payroll dept)
     comparison['Department'] = comparison['Department Name'].fillna(comparison['Depart'])
     
     # Fill category hour columns with 0 if missing
     for category, col in hour_categories.items():
         if col in comparison.columns:
             comparison[col] = comparison[col].fillna(0)
+    
+    # Add matching status for analysis
+    comparison['In_Timesheet'] = comparison['Total Hours'] > 0
+    comparison['In_Payroll'] = comparison['Total_Payroll_Hours'] > 0
+    comparison['In_Both'] = comparison['In_Timesheet'] & comparison['In_Payroll']
+    
+    print(f"Employees in timesheet only: {(~comparison['In_Payroll'] & comparison['In_Timesheet']).sum()}")
+    print(f"Employees in payroll only: {(comparison['In_Payroll'] & ~comparison['In_Timesheet']).sum()}")
+    print(f"Employees in both systems: {comparison['In_Both'].sum()}")
     
     return comparison, hour_categories
 
@@ -192,7 +243,7 @@ def generate_detailed_reports(comparison_df, hour_categories, tolerance=2.0):
     print("Generating detailed reports...")
     
     # Prepare columns for main report
-    base_columns = ['Name_Cleaned', 'Department', 'Total Hours', 'Total_Payroll_Hours', 'Total_Difference', 'Mismatch']
+    base_columns = ['Employee_ID', 'Employee_Name', 'Department', 'Total Hours', 'Total_Payroll_Hours', 'Total_Difference', 'Mismatch', 'In_Timesheet', 'In_Payroll', 'In_Both']
     
     # Add hour category columns (using actual column names)
     category_columns = []
@@ -208,11 +259,15 @@ def generate_detailed_reports(comparison_df, hour_categories, tolerance=2.0):
     
     # Rename columns for clarity
     column_rename = {
-        'Name_Cleaned': 'Employee Name',
+        'Employee_ID': 'Employee ID',
+        'Employee_Name': 'Employee Name',
         'Total Hours': 'Timesheet Hours',
         'Total_Payroll_Hours': 'Payroll Hours Total',
         'Total_Difference': 'Total Difference',
-        'Mismatch': 'Mismatch Flag'
+        'Mismatch': 'Mismatch Flag',
+        'In_Timesheet': 'Has Timesheet Data',
+        'In_Payroll': 'Has Payroll Data',
+        'In_Both': 'In Both Systems'
     }
     
     # Add category column renames (from Hrs.X to actual category names)
@@ -230,12 +285,14 @@ def generate_detailed_reports(comparison_df, hour_categories, tolerance=2.0):
     if hour_categories:
         breakdown_data = []
         for _, row in comparison_report.iterrows():
+            employee_id = row['Employee ID']
             employee_name = row['Employee Name']
             department = row['Department']
             
             for category in hour_categories.keys():
                 if category in row.index:
                     breakdown_data.append({
+                        'Employee ID': employee_id,
                         'Employee Name': employee_name,
                         'Department': department,
                         'Hour Category': category,
@@ -246,8 +303,11 @@ def generate_detailed_reports(comparison_df, hour_categories, tolerance=2.0):
         if breakdown_data:
             category_breakdown = pd.DataFrame(breakdown_data)
     
-    # Anomalies report
-    anomalies = comparison_report[comparison_report['Mismatch Flag'] == True].copy()
+    # Anomalies report (only employees in both systems with mismatches)
+    anomalies = comparison_report[
+        (comparison_report['Mismatch Flag'] == True) & 
+        (comparison_report['In Both Systems'] == True)
+    ].copy()
     
     # Department summary with category breakdowns
     dept_summary_data = []
@@ -260,6 +320,7 @@ def generate_detailed_reports(comparison_df, hour_categories, tolerance=2.0):
         summary_row = {
             'Department': dept,
             'Employee Count': len(dept_data),
+            'Employees in Both Systems': (dept_data['In Both Systems'] == True).sum(),
             'Total Timesheet Hours': dept_data['Timesheet Hours'].sum(),
             'Total Payroll Hours': dept_data['Payroll Hours Total'].sum(),
             'Total Difference': dept_data['Total Difference'].sum(),
@@ -275,14 +336,20 @@ def generate_detailed_reports(comparison_df, hour_categories, tolerance=2.0):
     
     dept_summary = pd.DataFrame(dept_summary_data)
     
-    # Statistics
+    # Enhanced statistics
+    matched_employees = comparison_report[comparison_report['In Both Systems'] == True]
+    
     stats = {
         'total_employees': len(comparison_report),
+        'employees_in_both_systems': len(matched_employees),
+        'employees_timesheet_only': (comparison_report['Has Timesheet Data'] & ~comparison_report['Has Payroll Data']).sum(),
+        'employees_payroll_only': (comparison_report['Has Payroll Data'] & ~comparison_report['Has Timesheet Data']).sum(),
         'employees_with_mismatches': len(anomalies),
         'total_timesheet_hours': comparison_report['Timesheet Hours'].sum(),
         'total_payroll_hours': comparison_report['Payroll Hours Total'].sum(),
         'total_difference': comparison_report['Total Difference'].sum(),
-        'tolerance': tolerance
+        'tolerance': tolerance,
+        'coverage_rate': len(matched_employees) / len(comparison_report) * 100 if len(comparison_report) > 0 else 0
     }
     
     return comparison_report, anomalies, dept_summary, category_breakdown, stats
@@ -314,6 +381,42 @@ def save_detailed_results(comparison_report, anomalies, dept_summary, category_b
     
     return filename
 
+def display_statistics(stats):
+    """Display enhanced analysis statistics."""
+    print("\n" + "="*80)
+    print("ENHANCED TIMESHEET vs PAYROLL ANALYSIS SUMMARY (Employee ID-based matching)")
+    print("="*80)
+    
+    # Overall Matching Statistics
+    print(f"\n📊 MATCHING ANALYSIS:")
+    print(f"Total Employees Found: {stats['total_employees']}")
+    print(f"Employees in Both Systems: {stats['employees_in_both_systems']}")
+    print(f"Coverage Rate: {stats['coverage_rate']:.1f}%")
+    print(f"Employees Timesheet Only: {stats['employees_timesheet_only']}")
+    print(f"Employees Payroll Only: {stats['employees_payroll_only']}")
+    
+    # Discrepancy Analysis
+    mismatch_rate = (stats['employees_with_mismatches'] / stats['employees_in_both_systems'] * 100) if stats['employees_in_both_systems'] > 0 else 0
+    print(f"\n⚠️  DISCREPANCY ANALYSIS (for matched employees):")
+    print(f"Employees with Mismatches: {stats['employees_with_mismatches']}")
+    print(f"Mismatch Rate: {mismatch_rate:.1f}%")
+    print(f"Tolerance Threshold: ±{stats['tolerance']} hours")
+    
+    # Hour Totals
+    print(f"\n🕐 HOUR TOTALS:")
+    print(f"Total Timesheet Hours: {stats['total_timesheet_hours']:,.1f}")
+    print(f"Total Payroll Hours: {stats['total_payroll_hours']:,.1f}")
+    print(f"Total Difference: {stats['total_difference']:,.1f} hours")
+    
+    # Impact Assessment
+    if stats['total_difference'] != 0:
+        if stats['total_difference'] > 0:
+            print(f"📈 Payroll exceeds timesheet by {abs(stats['total_difference']):,.1f} hours")
+        else:
+            print(f"📉 Timesheet exceeds payroll by {abs(stats['total_difference']):,.1f} hours")
+    
+    print("="*80)
+
 def main():
     """Main execution function."""
     # File paths
@@ -336,6 +439,9 @@ def main():
         
         # Save results
         output_file = save_detailed_results(comparison_report, anomalies, dept_summary, category_breakdown, stats)
+        
+        # Display statistics
+        display_statistics(stats)
         
         # Print summary
         print("\n" + "="*80)
